@@ -14,4 +14,4 @@ install: all
 	install -d $(DESTDIR)/usr/bin/
 	install -m 755 mptcpize $(DESTDIR)/usr/bin/
 	install -d $(DESTDIR)/usr/lib/mptcpize/
-	install -m 644 libmptcpwrap.so $(DESTDIR)/usr/lib/
+	install -m 644 libmptcpwrap.so $(DESTDIR)/usr/lib/mptcpize/
