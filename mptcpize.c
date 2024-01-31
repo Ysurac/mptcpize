@@ -13,6 +13,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sendfile.h>
 
 #include <argp.h>
 #include <dlfcn.h>
@@ -36,25 +37,27 @@
 #define MPTCPWRAP_ENV		"LD_PRELOAD=/usr/lib/mptcpize/libmptcpwrap.so"
 
 /* Program documentation. */
-static char argp_doc[] =
-		"mptcpize - a tool to enable MPTCP usage on unmodified legacy services\v"
-		"syntax:\n"
-		"\t mptcpize <options> <cmd>\n"
-		"avaliable <cmd>:\n"
-		"\trun [-d] prog [<args>]    run target program with specified arguments "
-		"forcing MPTCP socket usage instead of TCP"
-		"if the '-d' argument is provided, dump messages on stderr"
-		" when a TCP socket is forced to MPTCP\n"
-		"\tenable <unit>             update the systemd <unit>, forcing"
-		"the given service to run under the above launcher\n"
-		"\tdisable <unit>            update the systemd <unit>, removing"
-		"the above launcher\n";
+static char args_doc[] = "CMD";
 
-static struct argp argp = { 0, 0, 0, argp_doc, 0, 0, 0 };
+static char doc[] =
+        "mptcpize - a tool to enable MPTCP usage on unmodified legacy services\v"
+        "Available CMDs:\n"
+        "\trun [-d] prog [<args>]    Run target program with specified\n"
+        "\t                          arguments, forcing MPTCP socket usage\n"
+        "\t                          instead of TCP.  If the '-d' argument\n"
+        "\t                          is provided, dump messages on stderr\n"
+        "\t                          when a TCP socket is forced to MPTCP.\n\n"
+        "\tenable <unit>             Update the systemd <unit>, forcing\n"
+        "\t                          the given service to run under the\n"
+        "\t                          above launcher.\n\n"
+        "\tdisable <unit>            Update the systemd <unit>, removing\n"
+        "\t                          the above launcher.\n";
 
-void help(void)
+static struct argp const argp = { 0, 0, args_doc, doc, 0, 0, 0 };
+
+static void help(void)
 {
-	fprintf(stderr, "%s", argp_doc);
+	argp_help(&argp, stderr, ARGP_HELP_STD_HELP, "mptcpize");
 }
 
 static int run(int argc, char *av[])
@@ -161,10 +164,12 @@ static int unit_update(int argc, char *argv[], int enable)
 	char *unit, *line = NULL;
 	int append_env = enable;
 	char dst_path[PATH_MAX];
+	off_t bytes_copied = 0;
+	struct stat fileinfo;
+	int dst, unit_fd;
 	size_t len = 0;
 	ssize_t read;
 	FILE *src;
-	int dst;
 
 	if (argc < 1) {
 		fprintf(stderr, "missing unit argument\n");
@@ -208,11 +213,24 @@ static int unit_update(int argc, char *argv[], int enable)
 		error(1, errno, "can't read from %s", unit);
 	free(line);
 	fclose(src);
+
+	// copy back the modified file into the original unit
+	// note: avoid using rename, as it fails across filesystems
+	if (fstat(dst, &fileinfo) < 0)
+		error(1, errno, "can't stat %s", dst_path);
+
+	// re-open the unit file for writing
+	// mkstemp already opened the temporary file for R/W so we don't need
+	// to touch that file descriptor.
+	unit_fd = open(unit, O_TRUNC | O_RDWR);
+	if (unit_fd < 0)
+		error(1, errno, "can't open %s for writing", unit);
+
+	while (bytes_copied < fileinfo.st_size)
+		if (sendfile(unit_fd, dst, &bytes_copied, fileinfo.st_size - bytes_copied) < 0)
+			error(1, errno, "can't copy from %s to %s", dst_path, unit);
+
 	close(dst);
-
-	if (rename(dst_path, unit) < 0)
-		error(1, errno, "can't rename %s to %s", dst_path, unit);
-
 	if (system("systemctl daemon-reload") != 0)
 		error(1, errno, "can't reload unit, manual 'systemctl daemon-reload' is required");
 
